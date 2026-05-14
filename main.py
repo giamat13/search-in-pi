@@ -8,36 +8,52 @@ CHUNK_SIZE = 1024 * 256  # 256KB per chunk
 BAR_LEN = 30
 
 
+MAX_RETRIES = 10
+
 def download_pi() -> str:
-    """Download pi.txt with a progress bar and return the full text."""
+    """Download pi.txt with resume-on-failure and return the full text."""
     print("📡 Connecting to file...")
 
-    # Disable automatic decompression so Content-Length matches raw bytes received
-    with requests.get(URL, stream=True, headers={"Accept-Encoding": "identity"}) as response:
-        response.raise_for_status()
+    # Get total size first
+    head = requests.head(URL, headers={"Accept-Encoding": "identity"})
+    total_size = int(head.headers.get("Content-Length", 0))
+    print(f"📦 File size: {total_size / (1024 * 1024):.1f} MB\n")
 
-        total_size = int(response.headers.get("Content-Length", 0))
-        print(f"📦 File size: {total_size / (1024 * 1024):.1f} MB\n")
+    downloaded = 0
+    chunks = []
 
-        downloaded = 0
-        chunks = []
+    for attempt in range(1, MAX_RETRIES + 1):
+        headers = {"Accept-Encoding": "identity"}
+        if downloaded > 0:
+            headers["Range"] = f"bytes={downloaded}-"
+            print(f"\n🔄 Resuming from {downloaded / (1024*1024):.1f} MB (attempt {attempt})...")
 
-        for chunk in response.iter_content(chunk_size=CHUNK_SIZE):
-            chunks.append(chunk)
-            downloaded += len(chunk)
+        try:
+            with requests.get(URL, stream=True, headers=headers, timeout=30) as response:
+                response.raise_for_status()
 
-            if total_size:
-                percent = min(downloaded / total_size * 100, 100.0)
-                filled = min(int(BAR_LEN * downloaded / total_size), BAR_LEN)
-                bar = "█" * filled + "░" * (BAR_LEN - filled)
-                print(f"\r[{bar}] {percent:5.1f}%  |  Downloaded: {downloaded / (1024*1024):.1f} MB", end="", flush=True)
-            else:
-                print(f"\r⬇️  Downloaded: {downloaded / (1024 * 1024):.1f} MB", end="", flush=True)
+                for chunk in response.iter_content(chunk_size=CHUNK_SIZE):
+                    chunks.append(chunk)
+                    downloaded += len(chunk)
+
+                    if total_size:
+                        percent = min(downloaded / total_size * 100, 100.0)
+                        filled = min(int(BAR_LEN * downloaded / total_size), BAR_LEN)
+                        bar = "█" * filled + "░" * (BAR_LEN - filled)
+                        print(f"\r[{bar}] {percent:5.1f}%  |  Downloaded: {downloaded / (1024*1024):.1f} MB", end="", flush=True)
+                    else:
+                        print(f"\r⬇️  Downloaded: {downloaded / (1024 * 1024):.1f} MB", end="", flush=True)
+
+            break  # Success
+
+        except requests.exceptions.ChunkedEncodingError as e:
+            if attempt == MAX_RETRIES:
+                raise
+            print(f"\n⚠️  Connection dropped: {e}. Retrying...")
 
     print(f"\n✅ Download complete!\n")
     text = b"".join(chunks).decode("utf-8", errors="ignore")
 
-    # Save to cache
     with open(CACHE_FILE, "w", encoding="utf-8") as f:
         f.write(text)
 
